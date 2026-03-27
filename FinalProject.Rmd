@@ -1,0 +1,54 @@
+---
+title: "Stats Modeling and Computing Final Project Intermediate Report"
+author: "Avi Kodali(ank93) and Vatsal Malkari(vm593)"
+date: "2026-04-01"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+Our dataset has approximately 2,200 customers and has information about their demographics (age, gender, etc), purchasing behavior (how often they purchase, what products, etc), and marketing campaign responses (success rate of each campaign marketing, etc). Each observation corresponds to a single customer, with features that capture their personal characteristics and interaction with the company.
+
+Feature Categories 
+Demographics: Age (Year_Birth can be converted to Age), Income, Education level, Marital status, Number of children. This is important as it can affect purchasing power and preferences.
+
+Spending Behavior: MntWines (amount spent on wine), MntMeatProducts (amount spent on meat), MntFruits (amount spent on fruits), MntFishProducts (amount spent on fish), MntSweetProducts (amount spent on sweets), MntGoldProds (amount spent on gold products. These will help us with K-means clustering.
+
+Activity: Recency (days since last purchase), NumWebPurchases (web purchases), NumCatalogPurchases (catalog purchases), NumStorePurchases (store purchases), NumWebVisitsMonth (web visits per month). These show how active each customer is. We can also group customers by each of these columns to see which purchase is more effective for which demographic.
+
+Marketing Response: AcceptedCmp1 to AcceptedCmp5 (shows 0 if customer did not respond to campaign and 1 if they did yes), Response (what the data last campaign showed). We will use it to see how successful campaigns have been. This helps with bayesian inference (probability of response) and causal inference (treatment effect)
+
+
+```{r}
+df <- read.csv("marketing_campaign.csv", sep = "\t", stringsAsFactors = FALSE)
+```
+
+# Data Preprocessing
+
+```{r}
+df_clean <- df %>%
+  mutate(
+    Age = 2014 - Year_Birth,
+    Income = ifelse(is.na(Income), median(Income, na.rm = TRUE), Income)
+  )
+```
+
+```{r}
+spending_cols <- c("MntWines", "MntFruits", "MntMeatProducts", "MntFishProducts", "MntSweetProducts", "MntGoldProds")
+pca_result <- prcomp(df_clean[, spending_cols], center = TRUE, scale. = TRUE)
+summary(pca_result)
+```
+
+```{r}
+df_clean$Spend_PC1 <- pca_result$x[, 1]
+df_clean$Spend_PC2 <- pca_result$x[, 2]
+```
+
+```{r}
+df_kmeans <- df_clean %>%
+  mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+```
+
