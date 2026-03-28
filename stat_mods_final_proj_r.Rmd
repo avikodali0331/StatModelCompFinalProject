@@ -1,0 +1,207 @@
+---
+title: "Stats Modeling and Computing Final Project Intermediate Report"
+author: "Avi Kodali(ank93) and Vatsal Malkari(vm593)"
+date: "2026-04-01"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+Our dataset has approximately 2,200 customers and has information about their demographics (age, gender, etc), purchasing behavior (how often they purchase, what products, etc), and marketing campaign responses (success rate of each campaign marketing, etc). Each observation corresponds to a single customer, with features that capture their personal characteristics and interaction with the company.
+
+Feature Categories 
+Demographics: Age (Year_Birth can be converted to Age), Income, Education level, Marital status, Number of children. This is important as it can affect purchasing power and preferences.
+
+Spending Behavior: MntWines (amount spent on wine), MntMeatProducts (amount spent on meat), MntFruits (amount spent on fruits), MntFishProducts (amount spent on fish), MntSweetProducts (amount spent on sweets), MntGoldProds (amount spent on gold products. These will help us with K-means clustering.
+
+Activity: Recency (days since last purchase), NumWebPurchases (web purchases), NumCatalogPurchases (catalog purchases), NumStorePurchases (store purchases), NumWebVisitsMonth (web visits per month). These show how active each customer is. We can also group customers by each of these columns to see which purchase is more effective for which demographic.
+
+Marketing Response: AcceptedCmp1 to AcceptedCmp5 (shows 0 if customer did not respond to campaign and 1 if they did yes), Response (what the data last campaign showed). We will use it to see how successful campaigns have been. This helps with bayesian inference (probability of response) and causal inference (treatment effect)
+
+
+```{r}
+df <- read.csv("Downloads/marketing_campaign.csv", sep = "\t", stringsAsFactors = FALSE)
+```
+
+# Data Preprocessing
+
+```{r}
+df_clean <- df %>%
+  mutate(
+    Age = 2014 - Year_Birth,
+    Income = ifelse(is.na(Income), median(Income, na.rm = TRUE), Income)
+  )
+```
+
+```{r}
+spending_cols <- c("MntWines", "MntFruits", "MntMeatProducts", "MntFishProducts", "MntSweetProducts", "MntGoldProds")
+pca_result <- prcomp(df_clean[, spending_cols], center = TRUE, scale. = TRUE)
+summary(pca_result)
+```
+
+```{r}
+df_clean$Spend_PC1 <- pca_result$x[, 1]
+df_clean$Spend_PC2 <- pca_result$x[, 2]
+```
+
+
+```{r}
+df_kmeans <- df_clean %>%
+  mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+```
+
+
+```{r}
+numeric_features <- c("Age", "Income", "Spend_PC1", "Spend_PC2",
+                      "Recency", "NumWebPurchases", "NumCatalogPurchases",
+                      "NumStorePurchases", "NumWebVisitsMonth")
+
+df_scaled <- df_clean %>%
+  mutate(across(all_of(numeric_features), scale))
+```
+
+
+```{r}
+set.seed(123)
+wss <- sapply(1:12, function(k) {
+  kmeans(df_scaled[, numeric_features], centers = k, nstart = 25)$tot.withinss
+})
+
+# Plot to visualize the "elbow"
+plot(1:12, wss, type="b", xlab="Number of Clusters (k)", ylab="Within-Cluster Sum of Squares (WSS)",
+     main="Elbow Method for K-means", pch=19, col="blue")
+text(1:12, wss, labels=round(wss,1), pos=3, cex=0.8)
+wss_diff <- diff(wss)
+wss_diff
+```
+
+```{r}
+set.seed(123)
+kmeans_result <- kmeans(df_scaled[, numeric_features], centers = 4, nstart = 25)
+
+# Add cluster labels to original dataset
+df_clean$Cluster <- kmeans_result$cluster
+
+df_clean %>%
+  group_by(Cluster) %>%
+  summarise(
+    Avg_Age = mean(Age),
+    Avg_Income = mean(Income),
+    Avg_Spend_PC1 = mean(Spend_PC1),
+    Avg_Spend_PC2 = mean(Spend_PC2),
+    Avg_Recency = mean(Recency),
+    Avg_WebPurchases = mean(NumWebPurchases),
+    Avg_CatalogPurchases = mean(NumCatalogPurchases),
+    Avg_StorePurchases = mean(NumStorePurchases),
+    Avg_WebVisits = mean(NumWebVisitsMonth),
+    Avg_Response = mean(Response)
+  )
+```
+
+```{r}
+ggplot(df_clean, aes(x = Spend_PC1, y = Spend_PC2, color = factor(Cluster))) +
+geom_point(alpha = 0.6) + labs(title = "Customer Clusters", x = "Spend_PC1", y = "Spend_PC2", color = "Cluster")
+```
+
+```{r}
+# responses per cluster before anything
+library(dplyr)
+cluster_summary <- df_clean %>% group_by(Cluster) %>%
+summarize( Responded = sum(Response), Total = n())
+
+cluster_summary
+```
+
+```{r}
+# we apply bayesian posterior update
+cluster_summary <- cluster_summary %>%
+mutate( Alpha_post = 1 + Responded, Beta_post = 1 + Total - Responded)
+
+cluster_summary
+```
+
+
+```{r}
+# mean response expected prob a/a+b
+cluster_summary <- cluster_summary %>%
+mutate( Response_Prob = Alpha_post / (Alpha_post + Beta_post))
+
+cluster_summary
+# clusters 2 and 4 have the highest. 4 is the highest. 3 is the lowest agrees with previous conclusions given by k means
+```
+
+
+```{r}
+# just shows a visualization of the findings.
+library(ggplot2)
+
+ggplot(cluster_summary, aes(x = factor(Cluster), y = Response_Prob)) +
+geom_bar(stat = "identity") + labs(title = "Response Probability by Cluster",
+x = "Cluster", y = "Estimated Probability of Response")
+```
+
+```{r}
+#cluster back to dataset
+cluster_probs <- cluster_summary %>%
+  select(Cluster, Response_Prob)
+
+df_sim <- df_clean %>%
+  left_join(cluster_probs, by = "Cluster")
+```
+
+
+```{r}
+# each customer responds with either 0 or 1 (0 no response and 1 response)
+set.seed(123)
+
+df_sim$Sim_Response <- rbinom(
+  n = nrow(df_sim),
+  size = 1,
+  prob = df_sim$Response_Prob
+)
+total_responses <- sum(df_sim$Sim_Response)
+total_responses
+```
+
+
+```{r}
+# we will repeat this process for monte carlo
+set.seed(123)
+
+sim_results <- replicate(1000, {
+  sim <- rbinom(nrow(df_sim), 1, df_sim$Response_Prob)
+  sum(sim)
+})
+# now interpretation of results
+print("mean of results for monte carlo")
+mean(sim_results)
+print("standard deviation of the results")
+sd(sim_results)
+hist(sim_results, main="Simulated Responses", xlab="Total Responses")
+```
+
+```{r}
+# now we will repeat this process for targeted customers
+high_clusters <- cluster_summary %>%
+  filter(Response_Prob > mean(Response_Prob)) %>%
+  pull(Cluster)
+
+df_targeted <- df_sim %>%
+  filter(Cluster %in% high_clusters)
+
+sim_targeted <- replicate(1000, {
+  sim <- rbinom(nrow(df_targeted), 1, df_targeted$Response_Prob)
+  sum(sim)
+})
+
+print("mean of results for monte carlo")
+mean(sim_results)      # All customers
+mean(sim_targeted)     # Targeted customers
+
+print("standard deviation of the results")
+sd(sim_targeted)
+hist(sim_targeted, main="Simulated Responses", xlab="Total Responses")
+```
