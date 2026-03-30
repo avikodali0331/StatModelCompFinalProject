@@ -23,7 +23,7 @@ Marketing Response: AcceptedCmp1 to AcceptedCmp5 (shows 0 if customer did not re
 
 
 ```{r}
-df <- read.csv("Downloads/marketing_campaign.csv", sep = "\t", stringsAsFactors = FALSE)
+df <- read.csv("marketing_campaign.csv", sep = "\t", stringsAsFactors = FALSE)
 ```
 
 # Data Preprocessing
@@ -34,7 +34,9 @@ df_clean <- df %>%
     Age = 2014 - Year_Birth,
     Income = ifelse(is.na(Income), median(Income, na.rm = TRUE), Income)
   )
+df_clean
 ```
+
 
 ```{r}
 spending_cols <- c("MntWines", "MntFruits", "MntMeatProducts", "MntFishProducts", "MntSweetProducts", "MntGoldProds")
@@ -45,22 +47,22 @@ summary(pca_result)
 ```{r}
 df_clean$Spend_PC1 <- pca_result$x[, 1]
 df_clean$Spend_PC2 <- pca_result$x[, 2]
+df_clean$Spend_PC3 <- pca_result$x[, 3]
 ```
 
 
 ```{r}
 df_kmeans <- df_clean %>%
   mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
+df_kmeans
 ```
 
 
 ```{r}
-numeric_features <- c("Age", "Income", "Spend_PC1", "Spend_PC2",
-                      "Recency", "NumWebPurchases", "NumCatalogPurchases",
-                      "NumStorePurchases", "NumWebVisitsMonth")
+numeric_features <- c("Age", "Income", "Spend_PC1", "Spend_PC2", "Recency", "NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases", "NumWebVisitsMonth")
 
 df_scaled <- df_clean %>%
-  mutate(across(all_of(numeric_features), scale))
+  mutate(across(all_of(numeric_features), ~ as.numeric(scale(.))))
 ```
 
 
@@ -70,9 +72,8 @@ wss <- sapply(1:12, function(k) {
   kmeans(df_scaled[, numeric_features], centers = k, nstart = 25)$tot.withinss
 })
 
-# Plot to visualize the "elbow"
-plot(1:12, wss, type="b", xlab="Number of Clusters (k)", ylab="Within-Cluster Sum of Squares (WSS)",
-     main="Elbow Method for K-means", pch=19, col="blue")
+plot(1:12, wss, type="b", xlab="Number of Clusters (k)", ylab="Within cluster Sum of Squares",
+     main=" K-means", pch=19, col="blue")
 text(1:12, wss, labels=round(wss,1), pos=3, cex=0.8)
 wss_diff <- diff(wss)
 wss_diff
@@ -82,7 +83,6 @@ wss_diff
 set.seed(123)
 kmeans_result <- kmeans(df_scaled[, numeric_features], centers = 4, nstart = 25)
 
-# Add cluster labels to original dataset
 df_clean$Cluster <- kmeans_result$cluster
 
 df_clean %>%
@@ -107,7 +107,7 @@ geom_point(alpha = 0.6) + labs(title = "Customer Clusters", x = "Spend_PC1", y =
 ```
 
 ```{r}
-# responses per cluster before anything
+
 library(dplyr)
 cluster_summary <- df_clean %>% group_by(Cluster) %>%
 summarize( Responded = sum(Response), Total = n())
@@ -182,6 +182,7 @@ print("standard deviation of the results")
 sd(sim_results)
 hist(sim_results, main="Simulated Responses", xlab="Total Responses")
 ```
+
 
 ```{r}
 # now we will repeat this process for targeted customers
