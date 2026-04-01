@@ -45,16 +45,12 @@ summary(pca_result)
 ```
 
 ```{r}
-df_clean$Spend_PC1 <- pca_result$x[, 1]
-df_clean$Spend_PC2 <- pca_result$x[, 2]
-df_clean$Spend_PC3 <- pca_result$x[, 3]
-```
-
-
-```{r}
-df_kmeans <- df_clean %>%
-  mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
-df_kmeans
+df_clean <- df_clean %>%
+  mutate(
+    Spend_PC1 = pca_result$x[, 1],
+    Spend_PC2 = pca_result$x[, 2],
+    Spend_PC3 = pca_result$x[, 3]
+  )
 ```
 
 
@@ -107,8 +103,6 @@ geom_point(alpha = 0.6) + labs(title = "Customer Clusters", x = "Spend_PC1", y =
 ```
 
 ```{r}
-
-library(dplyr)
 cluster_summary <- df_clean %>% group_by(Cluster) %>%
 summarize( Responded = sum(Response), Total = n())
 
@@ -136,8 +130,6 @@ cluster_summary
 
 ```{r}
 # just shows a visualization of the findings.
-library(ggplot2)
-
 ggplot(cluster_summary, aes(x = factor(Cluster), y = Response_Prob)) +
 geom_bar(stat = "identity") + labs(title = "Response Probability by Cluster",
 x = "Cluster", y = "Estimated Probability of Response")
