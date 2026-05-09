@@ -5,9 +5,11 @@ date: "2026-04-01"
 output: pdf_document
 ---
 
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
+library(boot)
 ```
 
 Our dataset has approximately 2,200 customers and has information about their demographics (age, gender, etc), purchasing behavior (how often they purchase, what products, etc), and marketing campaign responses (success rate of each campaign marketing, etc). Each observation corresponds to a single customer, with features that capture their personal characteristics and interaction with the company.
@@ -33,8 +35,10 @@ df_clean <- df %>%
   mutate(
     Age = 2014 - Year_Birth,
     Income = ifelse(is.na(Income), median(Income, na.rm = TRUE), Income)
-  )%>%   filter(Age >= 18 & Age <= 100)
-df_clean
+  ) %>%
+  filter(Age >= 18 & Age <= 100) %>%
+  select(-Z_CostContact, -Z_Revenue) 
+df_clean %>% head()
 ```
 
 
@@ -47,29 +51,25 @@ summary(pca_result)
 ```{r}
 df_clean$Spend_PC1 <- pca_result$x[, 1]
 df_clean$Spend_PC2 <- pca_result$x[, 2]
-df_clean$Spend_PC3 <- pca_result$x[, 3]
 ```
 
-
 ```{r}
-df_kmeans <- df_clean %>%
-  mutate(across(where(is.numeric), ~ as.numeric(scale(.))))
-df_kmeans
-```
+numeric_features <- c("Age", "Spend_PC1", "Spend_PC2",
+                      "Recency", "NumWebPurchases", "NumCatalogPurchases",
+                      "NumStorePurchases", "NumWebVisitsMonth")
 
-
-```{r}
-numeric_features <- c("Age", "Income", "Spend_PC1", "Spend_PC2", "Recency", "NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases", "NumWebVisitsMonth")
-
+non_pc <- setdiff(numeric_features, c("Spend_PC1", "Spend_PC2", "Spend_PC3"))
 df_scaled <- df_clean %>%
-  mutate(across(all_of(numeric_features), ~ as.numeric(scale(.))))
+  mutate(across(all_of(non_pc), ~ as.numeric(scale(.)))) %>% 
+  select(-Income)
 ```
 
 
 ```{r}
 set.seed(123)
 wss <- sapply(1:12, function(k) {
-  kmeans(df_scaled[, numeric_features], centers = k, nstart = 25)$tot.withinss
+  kmeans(df_scaled[, numeric_features],
+         centers = k, nstart = 25, iter.max = 50)$tot.withinss
 })
 
 plot(1:12, wss, type="b", xlab="Number of Clusters (k)", ylab="Within cluster Sum of Squares",
@@ -81,7 +81,7 @@ wss_diff
 
 ```{r}
 set.seed(123)
-kmeans_result <- kmeans(df_scaled[, numeric_features], centers = 4, nstart = 25)
+kmeans_result <- kmeans(df_scaled[, numeric_features], centers = 4, nstart = 25, iter.max = 50)
 
 df_clean$Cluster <- kmeans_result$cluster
 
@@ -119,8 +119,6 @@ geom_point(alpha = 0.6) + labs(title = "Customer Clusters", x = "Spend_PC1", y =
 ```
 
 ```{r}
-
-library(dplyr)
 cluster_summary <- df_clean %>% group_by(Cluster) %>%
 summarize( Responded = sum(Response), Total = n())
 
@@ -128,8 +126,7 @@ cluster_summary
 ```
 
 ```{r}
-# we apply bootstrap here
-library(boot)
+high_value_clusters <- c(1, 2, 4)
 
 resp_rate <- function(data, indices) {
   mean(data[indices])
@@ -161,110 +158,415 @@ cluster_summary
 
 
 ```{r}
-# bootstrap simulation
-B <- 5000
-targeted_clusters <- c(1, 2, 3)
+response_rate <- function(data, indices) mean(data[indices])
 
-# Run simulation
 set.seed(123)
+per_cluster_bootstrap <- list()
 
-results_all <- numeric(B)
-results_targeted <- numeric(B)
+for (i in 1:4) {
+  cluster_responses <- df_clean %>% filter(Cluster == i) %>% pull(Response)
+  boot_obj <- boot(cluster_responses, response_rate, R = 5000)
+  ci_perc <- boot.ci(boot_obj, type = "perc")$percent[4:5]
 
-for(i in 1:B) {
-  # all customers
-  sim_all <- df_clean %>%
-    sample_n(size = nrow(df_clean), replace = TRUE) %>%
-    summarise(responses = sum(Response))
-  results_all[i] <- sim_all$responses
-  
-  # only selected clusters
-  sim_targeted <- df_clean %>%
-    filter(Cluster %in% targeted_clusters) %>%
-    sample_n(size = nrow(.), replace = TRUE) %>%
-    summarise(responses = sum(Response))
-  results_targeted[i] <- sim_targeted$responses
+  per_cluster_bootstrap[[i]] <- data.frame(
+    Cluster       = i,
+    N_Customers   = length(cluster_responses),
+    Response_Rate = boot_obj$t0,
+    Boot_SE       = sd(boot_obj$t),
+    CI_Lower      = ci_perc[1],
+    CI_Upper      = ci_perc[2]
+  )
 }
 
-#  results
-mean(results_all)
-mean(results_targeted)
-sd(results_all)
-sd(results_targeted)
+cluster_response_summary <- do.call(rbind, per_cluster_bootstrap)
+print(cluster_response_summary)
 
-# we see the differences between clusters here
-df_clean %>%
-  group_by(Cluster) %>%
-  summarize(
-    Avg_Income = mean(Income),
-    Avg_Recency = mean(Recency),
-    Avg_WebVisits = mean(NumWebVisitsMonth),
-    Avg_StorePurchases = mean(NumStorePurchases),
-    Avg_CatalogPurchases = mean(NumCatalogPurchases)
+# Visualize per-cluster CIs
+ggplot(cluster_response_summary, aes(x = factor(Cluster), y = Response_Rate)) +
+  geom_point(size = 4, colour = "steelblue") +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper),
+                width = 0.2, colour = "steelblue") +
+  geom_hline(yintercept = mean(df_clean$Response),
+             linetype = "dashed", colour = "red") +
+  labs(
+    title    = "Per-Cluster Response Rates with 95% Bootstrap CIs",
+    subtitle = "Red dashed = overall response rate",
+    x        = "Cluster",
+    y        = "Response Rate"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+```{r}
+high_value_responses  <- df_clean$Response[df_clean$Cluster %in% high_value_clusters]
+other_cluster_responses <- df_clean$Response[!(df_clean$Cluster %in% high_value_clusters)]
+
+n_high_value  <- length(high_value_responses)
+n_other       <- length(other_cluster_responses)
+
+observed_rate_diff <- mean(high_value_responses) - mean(other_cluster_responses)
+
+set.seed(123)
+B <- 5000
+bootstrap_rate_diffs <- numeric(B)
+
+for (i in 1:B) {
+  high_value_resample  <- sample(high_value_responses,    n_high_value, replace = TRUE)
+  other_resample       <- sample(other_cluster_responses, n_other,      replace = TRUE)
+  bootstrap_rate_diffs[i] <- mean(high_value_resample) - mean(other_resample)
+}
+
+# All three CI methods (lecture slides 19, 20, 21)
+alpha            <- 0.05
+bootstrap_se     <- sd(bootstrap_rate_diffs)
+
+ci_normal <- c(
+  observed_rate_diff - qnorm(1 - alpha/2) * bootstrap_se,
+  observed_rate_diff + qnorm(1 - alpha/2) * bootstrap_se
+)
+
+ci_percentile <- quantile(bootstrap_rate_diffs, c(alpha/2, 1 - alpha/2))
+
+ci_pivotal <- c(
+  2 * observed_rate_diff - quantile(bootstrap_rate_diffs, 1 - alpha/2),
+  2 * observed_rate_diff - quantile(bootstrap_rate_diffs, alpha/2)
+)
+
+cat("\n=== TWO-SAMPLE BOOTSTRAP: HIGH-VALUE vs OTHER CLUSTERS ===\n")
+cat("Mean response rate (high-value clusters):", round(mean(high_value_responses), 4), "\n")
+cat("Mean response rate (other clusters):     ", round(mean(other_cluster_responses), 4), "\n")
+cat("Observed difference in rates:            ", round(observed_rate_diff, 4), "\n")
+cat("Bootstrap SE:                            ", round(bootstrap_se, 4), "\n\n")
+
+cat("Normal     95% CI: [", round(ci_normal[1], 4),     ",", round(ci_normal[2], 4),     "]\n")
+cat("Percentile 95% CI: [", round(ci_percentile[1], 4), ",", round(ci_percentile[2], 4), "]\n")
+cat("Pivotal    95% CI: [", round(ci_pivotal[1], 4),    ",", round(ci_pivotal[2], 4),    "]\n\n")
+
+# Decision rule (lecture slide 50): does the CI exclude zero?
+significant <- ci_percentile[1] > 0
+cat("Decision rule: percentile CI excludes 0 →", significant, "\n")
+if (significant) {
+  cat("=> Statistically significant. High-value targeting outperforms.\n")
+}
+
+# Visualize the bootstrap distribution of the difference
+ggplot(data.frame(rate_diff = bootstrap_rate_diffs), aes(x = rate_diff)) +
+  geom_histogram(bins = 50, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = observed_rate_diff, colour = "red", linewidth = 1) +
+  geom_vline(xintercept = ci_percentile, colour = "darkgreen",
+             linetype = "dashed", linewidth = 0.8) +
+  geom_vline(xintercept = 0, colour = "black", linetype = "dotted") +
+  labs(
+    title    = "Bootstrap Distribution: Difference in Response Rates",
+    subtitle = paste0("Red = observed (", round(observed_rate_diff, 3),
+                      ") | Green dashed = 95% percentile CI | Dotted = null"),
+    x        = "Difference in Response Rate (high-value, other)",
+    y        = "Count"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+
+```{r}
+n_contacted_targeted   <- sum(df_clean$Cluster %in% high_value_clusters)
+n_contacted_mass       <- nrow(df_clean)
+
+set.seed(123)
+B <- 5000
+targeted_strategy_rate <- numeric(B)
+mass_strategy_rate     <- numeric(B)
+
+for (i in 1:B) {
+  high_value_resample <- sample(high_value_responses,
+                                n_high_value, replace = TRUE)
+  full_dataset_resample <- sample(df_clean$Response,
+                                  n_contacted_mass, replace = TRUE)
+  targeted_strategy_rate[i] <- mean(high_value_resample)
+  mass_strategy_rate[i]     <- mean(full_dataset_resample)
+}
+
+cat("\n=== STRATEGY EFFICIENCY (responses per customer contacted) ===\n")
+cat("Mass strategy (target all):    ", round(mean(mass_strategy_rate), 4),
+    " 95% CI: [", round(quantile(mass_strategy_rate, 0.025), 4),
+    ",", round(quantile(mass_strategy_rate, 0.975), 4), "]\n")
+cat("Targeted (high-value clusters):", round(mean(targeted_strategy_rate), 4),
+    " 95% CI: [", round(quantile(targeted_strategy_rate, 0.025), 4),
+    ",", round(quantile(targeted_strategy_rate, 0.975), 4), "]\n\n")
+
+# Headline numbers for the report
+expected_responses_mass     <- mean(mass_strategy_rate)     * n_contacted_mass
+expected_responses_targeted <- mean(targeted_strategy_rate) * n_contacted_targeted
+
+cat("Customers contacted — mass strategy:    ", n_contacted_mass, "\n")
+cat("Customers contacted — targeted strategy:", n_contacted_targeted,
+    " (", round(100 * n_contacted_targeted / n_contacted_mass, 1),
+    "% of total)\n")
+cat("Expected responses  — mass strategy:    ", round(expected_responses_mass), "\n")
+cat("Expected responses  — targeted strategy:", round(expected_responses_targeted),
+    " (", round(100 * expected_responses_targeted / expected_responses_mass, 1),
+    "% of mass-targeting)\n")
+```
+
+```{r}
+df_clean <- df_clean %>%
+  mutate(
+    Targeted = as.integer(Cluster %in% high_value_clusters),
+    Income_Group = case_when(
+      Income < 40000  ~ "Low",
+      Income <= 70000 ~ "Medium",
+      TRUE            ~ "High"
+    )
   )
 ```
 
-
 ```{r}
-# Density plot of simulation results
-sim_results <- data.frame( Responses = c(results_all, results_targeted),
-  Strategy = rep(c("Target All", "Target Selected"), each = B))
+income_vs_targeted <- df_clean %>%
+  group_by(Income_Group) %>%
+  summarise(Targeting_Rate = round(mean(Targeted), 3), N = n())
 
-ggplot(sim_results, aes(x = Responses, fill = Strategy)) +
-  geom_density(alpha = 0.5) +
-  labs(title = "Bootstrap Simulation: Campaign Outcomes", x = "Number of Responses", y = "Density") 
+income_vs_response <- df_clean %>%
+  group_by(Income_Group) %>%
+  summarise(Response_Rate = round(mean(Response), 3), N = n())
+
+cat("Income → Targeting rate:\n");  print(income_vs_targeted)
+cat("\nIncome → Response rate:\n"); print(income_vs_response)
+cat("\nIncome predicts both. Stratification is required.\n")
+
+# Raw (biased) difference in means
+raw_means <- df_clean %>%
+  group_by(Targeted) %>%
+  summarise(Mean_Response = mean(Response), N = n())
+
+raw_diff <- diff(raw_means$Mean_Response)
+cat("\nRaw difference in means (biased):", round(raw_diff, 4), "\n")
 ```
 
 ```{r}
-# test if targeting causes higher response rates, or if it's just because targeted customers have higher incomes.
-low_threshold <- quantile(df_clean$Income, 1/3)
-high_threshold <- quantile(df_clean$Income, 2/3)
+strata <- c("Low", "Medium", "High")
 
-df_clean$Income_Group <- "Medium"
-df_clean$Income_Group[df_clean$Income <= low_threshold] <- "Low"
-df_clean$Income_Group[df_clean$Income >= high_threshold] <- "High"
+stratum_results <- lapply(strata, function(g) {
+  d  <- df_clean %>% filter(Income_Group == g)
+  y1 <- d$Response[d$Targeted == 1]
+  y0 <- d$Response[d$Targeted == 0]
+  n1 <- length(y1)
+  n0 <- length(y0)
 
-# targeted customers
-df_clean$Targeted <- "No"
-df_clean$Targeted[df_clean$Cluster %in% c(1, 2, 3)] <- "Yes"
+  psi_hat <- mean(y1) - mean(y0)
+  se_g    <- sqrt(var(y1)/n1 + var(y0)/n0)   # within-stratum Neyman SE
+  ci_lo   <- psi_hat - 1.96 * se_g
+  ci_hi   <- psi_hat + 1.96 * se_g
 
-# response rates
-df_clean %>%
-  group_by(Income_Group, Targeted) %>%
-  summarize(Response_Rate = mean(Response), 
-            Customers = n())
+  cat("\nIncome group:", g, "\n")
+  cat("  n_treated =", n1, " | n_control =", n0, "\n")
+  cat("  Mean(Y | A=1) =", round(mean(y1), 4),
+      " | Mean(Y | A=0) =", round(mean(y0), 4), "\n")
+  cat("  ATE estimate:", round(psi_hat, 4),
+      " | 95% CI: [", round(ci_lo, 4), ",", round(ci_hi, 4), "]\n")
+
+  data.frame(
+    Income_Group = g,
+    n_treated = n1, n_control = n0,
+    mean_y1 = mean(y1), mean_y0 = mean(y0),
+    ATE = psi_hat,
+    SE  = se_g,
+    CI_lower = ci_lo, CI_upper = ci_hi
+  )
+})
+
+stratum_df <- bind_rows(stratum_results) %>%
+  mutate(
+    N_stratum = n_treated + n_control,
+    Weight    = N_stratum / sum(N_stratum)
+  )
+
+# Weighted overall ATE — uses within-stratum SEs (correct formula)
+overall_ATE   <- sum(stratum_df$ATE * stratum_df$Weight)
+overall_SE    <- sqrt(sum(stratum_df$Weight^2 * stratum_df$SE^2))
+overall_CI_lo <- overall_ATE - 1.96 * overall_SE
+overall_CI_hi <- overall_ATE + 1.96 * overall_SE
+
+cat("\n=== OVERALL STRATIFIED ATE ===\n")
+cat("Weighted ATE: ", round(overall_ATE, 4), "\n")
+cat("95% CI:       [", round(overall_CI_lo, 4),
+    ",", round(overall_CI_hi, 4), "]\n")
+cat("Interpretation: Conditional on income, being in a high-value cluster\n")
+cat("increases response probability by approximately",
+    round(overall_ATE * 100, 1), "percentage points.\n")
+
+# Restricted estimand: drop High-income stratum due to positivity violation
+stratum_df_overlap <- stratum_df %>% filter(Income_Group != "High")
+
+# Re-weight the remaining strata so they sum to 1
+weights_restricted <- stratum_df_overlap$N_stratum / sum(stratum_df_overlap$N_stratum)
+
+overall_ATE_restricted <- sum(stratum_df_overlap$ATE * weights_restricted)
+overall_SE_restricted  <- sqrt(sum(weights_restricted^2 * stratum_df_overlap$SE^2))
+overall_CI_lo_r <- overall_ATE_restricted - 1.96 * overall_SE_restricted
+overall_CI_hi_r <- overall_ATE_restricted + 1.96 * overall_SE_restricted
+
+cat("\n=== RESTRICTED STRATIFIED ATE (Low + Medium only) ===\n")
+cat("Weighted ATE:    ", round(overall_ATE_restricted, 4), "\n")
+cat("95% CI: [", round(overall_CI_lo_r, 4), ",", round(overall_CI_hi_r, 4), "]\n")
+cat("Estimand: ATE among customers with Income < $70K\n")
+cat("(", sum(stratum_df_overlap$N_stratum), "of", sum(stratum_df$N_stratum), "customers)\n")
 ```
 
 ```{r}
-# causal evidence that targeting works, even when you compare customers with the same income
-causal_table <- df_clean %>%
-  group_by(Income_Group, Targeted) %>%
-  summarise(Response_Rate = mean(Response), 
-            Customers = n())
+# Restrict to Low + Medium for both data and strata
+df_overlap <- df_clean %>% filter(Income_Group != "High")
+strata_overlap <- c("Low", "Medium")
 
-print(causal_table)
+# Modified version of compute_weighted_ate that uses strata_overlap
+compute_weighted_ate_overlap <- function(data) {
+  s <- lapply(strata_overlap, function(g) {
+    d <- data %>% filter(Income_Group == g)
+    y1 <- d$Response[d$Targeted == 1]
+    y0 <- d$Response[d$Targeted == 0]
+    if (length(y1) == 0 || length(y0) == 0) {
+      return(data.frame(ATE = 0, N = nrow(d)))
+    }
+    data.frame(ATE = mean(y1) - mean(y0), N = nrow(d))
+  })
+  s <- bind_rows(s)
+  w <- s$N / sum(s$N)
+  sum(s$ATE * w)
+}
 
-ggplot(causal_table, aes(x = Income_Group, y = Response_Rate, fill = Targeted)) +
-  geom_bar(stat = "identity", position = "dodge") +
-  labs(title = "Response Rates by Income Group and Targeting Status",
-       x = "Income Group", y = "Response Rate", fill = "Targeted") 
+t_obs_overlap <- abs(compute_weighted_ate_overlap(df_overlap))
+
+set.seed(123)
+B <- 5000
+t_perm_overlap <- numeric(B)
+
+for (b in 1:B) {
+  df_perm <- df_overlap %>%
+    group_by(Income_Group) %>%
+    mutate(Targeted = sample(Targeted)) %>%
+    ungroup()
+  t_perm_overlap[b] <- abs(compute_weighted_ate_overlap(df_perm))
+}
+
+p_value_overlap <- mean(t_perm_overlap >= t_obs_overlap)
+cat("Restricted permutation p-value (Low + Medium only):", 
+    round(p_value_overlap, 4), "\n")
+```
+
+```{r}
+# Stratum-level ATE plot
+ggplot(stratum_df, aes(x = Income_Group, y = ATE)) +
+  geom_point(size = 3, colour = "steelblue") +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                width = 0.15, colour = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "red") +
+  geom_hline(yintercept = overall_ATE, linetype = "dotted",
+             colour = "darkgreen", linewidth = 0.8) +
+  labs(
+    title    = "Stratum-Level ATE Estimates with 95% CIs",
+    subtitle = paste0("Red dashed = null (ATE=0)  |  ",
+                      "Green dotted = overall weighted ATE (",
+                      round(overall_ATE, 3), ")"),
+    x = "Income Group",
+    y = "Estimated ATE (probability scale)"
+  ) +
+  theme_minimal(base_size = 13)
+
+# Permutation distribution — make sure observed statistic is on-chart
+hist(t_perm_overlap,
+     breaks = 60,
+     xlim   = c(0, max(t_obs_overlap, max(t_perm_overlap)) * 1.05),
+     col    = "lightblue",
+     border = "white",
+     main   = "Permutation Distribution Under Sharp Null",
+     xlab   = "|Weighted ATE|",
+     sub    = paste0("Red dashed = observed (", round(t_obs_overlap, 4),
+                     ")  |  p-value = ", round(p_value_overlap, 4)))
+abline(v = t_obs_overlap, col = "red", lwd = 2, lty = 2)
+```
+
+```{r}
+cat("\n=== FINAL SUMMARY ===\n")
+cat("Bootstrap evidence:\n")
+cat("  - High-value clusters (1, 2, 3) response rate:",
+    round(mean(high_value_responses) * 100, 1), "%\n")
+cat("  - Other clusters (2, 4) response rate:    ",
+    round(mean(other_cluster_responses) * 100, 1), "%\n")
+cat("  - Difference in response rates:           ",
+    round(observed_rate_diff, 4), "\n")
+cat("  - Percentile 95% CI for difference:       [",
+    round(ci_percentile[1], 4), ",", round(ci_percentile[2], 4), "]\n")
+cat("\nCausal evidence:\n")
+cat("  - Stratified ATE (controlling for income):",
+    round(overall_ATE, 4), "\n")
+cat("  - 95% CI for stratified ATE:              [",
+    round(overall_CI_lo, 4), ",", round(overall_CI_hi, 4), "]\n")
+cat("  - Permutation p-value:                    ",
+    round(p_value_overlap, 4), "\n")
 ```
 
 
 ```{r}
-# confidence intervals for the difference in response rates between targeted and non-targeted customers, within each income group
-# low income group
-yes_low <- df_clean$Response[df_clean$Income_Group == "Low" & df_clean$Targeted == "Yes"]
-no_low <- df_clean$Response[df_clean$Income_Group == "Low" & df_clean$Targeted == "No"]
-prop.test(c(sum(yes_low), sum(no_low)), c(length(yes_low), length(no_low)))$conf.int
+# lin estimator
+df_clean <- df_clean %>%
+  mutate(Edu_Num = as.integer(factor(Education,
+                                levels = c("Basic", "2n Cycle", "Graduation", "Master", "PhD"))),
+    Married = as.integer(Marital_Status %in% c("Married", "Together")),
+    Children = Kidhome + Teenhome
+  )
 
-# medium income group
-yes_med <- df_clean$Response[df_clean$Income_Group == "Medium" & df_clean$Targeted == "Yes"]
-no_med <- df_clean$Response[df_clean$Income_Group == "Medium" & df_clean$Targeted == "No"]
-prop.test(c(sum(yes_med), sum(no_med)), c(length(yes_med), length(no_med)))$conf.int
+# confounder set
+covars <- c("Income", "Age", "Edu_Num", "Married", "Children", "Recency",
+            "NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases", "NumWebVisitsMonth")
 
-# high income group
-yes_high <- df_clean$Response[df_clean$Income_Group == "High" & df_clean$Targeted == "Yes"]
-no_high <- df_clean$Response[df_clean$Income_Group == "High" & df_clean$Targeted == "No"]
-prop.test(c(sum(yes_high), sum(no_high)), c(length(yes_high), length(no_high)))$conf.int
+# Demean covariates (Lin 2013)
+df_model <- df_clean %>%
+  select(Response, Targeted, all_of(covars)) %>%
+  drop_na() %>%
+  mutate(across(all_of(covars), ~ . - mean(.), .names = "c_{.col}"))
+
+centered <- paste0("c_", covars)
+
+# interacted regression (Lin estimator)
+formula_lin <- as.formula(
+  paste("Response ~ Targeted * (", paste(centered, collapse = " + "), ")")
+)
+
+lin_fit <- lm(formula_lin, data = df_model)
+
+# Robust SE
+library(sandwich)
+library(lmtest)
+robust <- coeftest(lin_fit, vcov = vcovHC(lin_fit, type = "HC2"))
+
+ate     <- coef(lin_fit)["Targeted"]
+se      <- robust["Targeted", "Std. Error"]
+ci_low  <- ate - 1.96 * se
+ci_high <- ate + 1.96 * se
+
+cat("\n  regression-adjusted ATE (Lin estimator)  \n")
+cat("ATE:    ", round(ate, 4), "\n")
+cat("SE:     ", round(se, 4), "\n")
+cat("95% CI: [", round(ci_low, 4), ",", round(ci_high, 4), "]\n")
+cat("p-value:", round(robust["Targeted", "Pr(>|t|)"], 4), "\n")
 ```
+
+```{r}
+ggplot(ate_comparison %>% filter(!is.na(CI_Lower)),
+       aes(x = Method, y = ATE)) +
+  geom_point(size = 3, colour = "steelblue") +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2, colour = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "red") +
+  coord_flip() + labs(title = "ATE Estimates Across Adjustment Methods",
+    subtitle = "Effect shrinks after adjusting for recency & activity",
+    x = NULL, y = "Estimated ATE") + theme_minimal(base_size = 13)
+```
+
+After adjusting for key demographic and behavioral variables using the Lin estimator, the estimated treatment effect of 
+being in a high‑value cluster drops to 2.97%, with a 95% confidence interval from –4.23% to 10.16% and a p‑value of 0.4188. 
+This means that once we control for factors like age, income, education, marital status, number of children, recency, and purchase‑channel activity, 
+the remaining difference in response rates between targeted and non‑targeted customers is small and statistically indistinguishable from zero. 
+In plain language, the cluster label itself does not appear to cause higher response rates after accounting for these underlying behavioral differences.
+This result clarifies why the high‑value clusters performed better: they contain customers who were already more engaged, more recent, 
+and more active across purchase channels. The clusters are still extremely valuable for targeting because they efficiently group together 
+the customers most likely to respond, even if the cluster label itself is not the causal driver. Tthe regression‑adjusted analysis shows 
+that selective advertising still works. It works because the clusters capture high‑engagement behavior, not because the cluster assignment 
+independently increases response probability.
