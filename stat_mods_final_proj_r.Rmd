@@ -550,6 +550,14 @@ cat("p-value:", round(robust["Targeted", "Pr(>|t|)"], 4), "\n")
 ```
 
 ```{r}
+ate_comparison <- data.frame(Method = c("Raw Difference", "Stratified ATE", "Restricted Stratified ATE", "Lin Estimator"),
+  ATE = c(observed_rate_diff, overall_ATE, overall_ATE_restricted,ate),
+  CI_Lower = c(ci_percentile[1], overall_CI_lo, overall_CI_lo_r, ci_low),
+  CI_Upper = c(ci_percentile[2], overall_CI_hi, overall_CI_hi_r, ci_high)
+)
+```
+
+```{r}
 ggplot(ate_comparison %>% filter(!is.na(CI_Lower)),
        aes(x = Method, y = ATE)) +
   geom_point(size = 3, colour = "steelblue") +
