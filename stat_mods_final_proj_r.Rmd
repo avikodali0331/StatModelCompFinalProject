@@ -89,7 +89,6 @@ df_clean %>%
 ```
 
 ```{r}
-# Average income by cluster
 df_clean %>%
   group_by(Cluster) %>%
   summarize(Avg_Income = mean(Income)) %>%
@@ -119,7 +118,6 @@ resp_rate <- function(data, indices) {
   mean(data[indices])
 }
 
-# Bootstrap for each cluster
 bootstrap_results <- list()
 
 for(i in 1:4) {
@@ -166,8 +164,8 @@ for (i in 1:4) {
 cluster_response_summary <- do.call(rbind, per_cluster_bootstrap)
 print(cluster_response_summary)
 
-# Visualize per-cluster CIs
 ggplot(cluster_response_summary, aes(x = factor(Cluster), y = Response_Rate)) +
+  geom_col(fill = "steelblue4", alpha = 0.7) +
   geom_point(size = 4, colour = "steelblue") +
   geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2, colour = "steelblue") +
   geom_hline(yintercept = mean(df_clean$Response), linetype = "dashed", colour = "red") +
@@ -213,7 +211,6 @@ cat("Bootstrap SE: ", round(bootstrap_se, 4), "\n\n")
 
 cat("Percentile 95% CI: [", round(ci_percentile[1], 4), ",", round(ci_percentile[2], 4), "]\n")
 
-# Visualize the bootstrap distribution of the difference
 ggplot(data.frame(rate_diff = bootstrap_rate_diffs), aes(x = rate_diff)) +
   geom_histogram(bins = 50, fill = "steelblue", colour = "white") +
   geom_vline(xintercept = observed_rate_diff, colour = "red", linewidth = 1) +
@@ -259,12 +256,17 @@ cat("Expected responses  — targeted strategy:", round(expected_responses_targe
 ```
 
 ```{r}
+quantile(df_clean$Income, probs = c(0.33, 0.67))
+```
+
+
+```{r}
 df_clean <- df_clean %>%
   mutate(
     Targeted = as.integer(Cluster %in% high_value_clusters),
     Income_Group = case_when(
       Income < 40000 ~ "Low",
-      Income <= 70000 ~ "Medium",
+      Income <= 63000 ~ "Medium",
       TRUE ~ "High"
     )
   )
@@ -328,7 +330,6 @@ stratum_df <- bind_rows(stratum_results) %>%
     Weight = N_stratum / sum(N_stratum)
   )
 
-# Drop High-income stratum due to positivity violation
 stratum_df_overlap <- stratum_df %>% filter(Income_Group != "High")
 
 weights_restricted <- stratum_df_overlap$N_stratum / sum(stratum_df_overlap$N_stratum)
@@ -338,7 +339,6 @@ overall_SE_restricted  <- sqrt(sum(weights_restricted^2 * stratum_df_overlap$SE^
 overall_CI_lo_r <- overall_ATE_restricted - 1.96 * overall_SE_restricted
 overall_CI_hi_r <- overall_ATE_restricted + 1.96 * overall_SE_restricted
 
-cat("\n=== RESTRICTED STRATIFIED ATE (Low + Medium only) ===\n")
 cat("Weighted ATE:    ", round(overall_ATE_restricted, 4), "\n")
 cat("95% CI: [", round(overall_CI_lo_r, 4), ",", round(overall_CI_hi_r, 4), "]\n")
 cat("Estimand: ATE among customers with Income < $70K\n")
@@ -346,7 +346,6 @@ cat("(", sum(stratum_df_overlap$N_stratum), "of", sum(stratum_df$N_stratum), "cu
 ```
 
 ```{r}
-# Restrict to Low + Medium for both data and strata
 df_overlap <- df_clean %>% filter(Income_Group != "High")
 strata_overlap <- c("Low", "Medium")
 
@@ -384,7 +383,6 @@ cat("Restricted permutation p-value (Low + Medium only):", round(p_value_overlap
 ```
 
 ```{r}
-# Stratum-level ATE plot
 stratum_df %>% 
   filter(Income_Group != "High") %>%  
   ggplot(aes(x = Income_Group, y = ATE)) +
@@ -400,7 +398,6 @@ stratum_df %>%
   ) +
   theme_minimal(base_size = 13)
 
-# Permutation distribution
 hist(t_perm_overlap,
      breaks = 60,
      xlim = c(0, max(t_obs_overlap, max(t_perm_overlap)) * 1.05),
@@ -426,17 +423,14 @@ cat("  - Permutation p-value: ", round(p_value_overlap, 4), "\n")
 
 
 ```{r}
-# lin estimator
 df_clean <- df_clean %>%
   mutate(Edu_Num = as.integer(factor(Education, levels = c("Basic", "2n Cycle", "Graduation", "Master", "PhD"))),
     Married = as.integer(Marital_Status %in% c("Married", "Together")),
     Children = Kidhome + Teenhome
   )
 
-# confounder set
 covars <- c("Income", "Age", "Edu_Num", "Married", "Children", "Recency", "NumWebPurchases", "NumCatalogPurchases", "NumStorePurchases", "NumWebVisitsMonth")
 
-# Demean covariates
 df_model <- df_clean %>%
   select(Response, Targeted, all_of(covars)) %>%
   drop_na() %>%
@@ -444,14 +438,12 @@ df_model <- df_clean %>%
 
 centered <- paste0("c_", covars)
 
-# interacted regression (Lin estimator)
 formula_lin <- as.formula(
   paste("Response ~ Targeted * (", paste(centered, collapse = " + "), ")")
 )
 
 lin_fit <- lm(formula_lin, data = df_model)
 
-# Robust SE
 robust <- coeftest(lin_fit, vcov = vcovHC(lin_fit, type = "HC2"))
 
 ate <- coef(lin_fit)["Targeted"]
@@ -465,11 +457,6 @@ cat("SE: ", round(se, 4), "\n")
 cat("95% CI: [", round(ci_low, 4), ",", round(ci_high, 4), "]\n")
 cat("p-value:", round(robust["Targeted", "Pr(>|t|)"], 4), "\n")
 ```
-
-```{r}
-summary(lin_fit)
-```
-
 
 ```{r}
 ate_comparison <- data.frame(Method = c("Raw Difference", "Restricted Stratified ATE", "Lin Estimator"),
